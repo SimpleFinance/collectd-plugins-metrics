@@ -1,0 +1,215 @@
+#!/usr/bin/env ruby
+#
+#  metrics-stats- a collectd plugin for Linux to monitor unicorn processes
+#
+# James Casey <james@banksimple.com>
+#
+
+require 'rubygems'
+require 'json'
+
+require 'optparse'
+require 'net/http'
+require 'uri'
+
+#default options
+options = {
+    :hostname => 'localhost',
+    :port => 8081,
+    :wait_time => 10,
+    :timeout => 10,
+    :single => false
+}
+
+
+# The name of the collectd plugin, something like apache, memory, mysql, interface, ...
+PLUGIN_NAME = 'metrics'
+
+module Collectd
+    class Metrics
+        attr_accessor :metrics
+        attr_accessor :plugin_name
+        attr_accessor :instance_name
+
+        def initialize(hostname, port, timeout)
+            @uri = URI.parse("http://#{hostname}:#{port}/metrics")
+            @timeout = timeout
+            reload
+        end
+
+        def reload(time=Time.now.to_i)
+            response = nil
+            begin
+                conn = Net::HTTP.new(@uri.host, @uri.port)
+                conn.open_timeout= @timeout
+                conn.read_timeout= @timeout
+                response = conn.start {|http|
+                    conn.request_get(@uri.request_uri)
+                }
+            rescue Timeout::Error
+                $stderr.puts "ERROR : Connection timed out : #{@uri.host}:#{@uri.port} (#{@timeout} sec)"
+                exit 1
+            rescue SystemCallError => e
+                $stderr.puts "ERROR : System Error : #{e.message} (#{@uri.host}:#{@uri.port})"
+                exit 2
+            rescue SocketError => e
+                $stderr.puts "ERROR : Socket Error:  #{e.message} (#{@uri.host}:#{@uri.port})"
+                exit 2
+            end
+
+            case response
+            when Net::HTTPSuccess then
+                @metrics = JSON.parse(response.body)
+                @time = time
+            else
+                #puts response.error!
+                @metrics = nil
+            end
+            @metrics
+        end
+
+        def jvm
+            @metrics['jvm']
+        end
+
+        def memory
+            "%.6f:%.6f" % [ jvm['memory']['heap_usage'], jvm['memory']['non_heap_usage'] ]
+        end
+
+        def fd_usage
+            "%.6f" % jvm['fd_usage']
+        end
+
+
+        def putval(type, region, name, output)
+            instance_name = region.split('.')[-1]
+            "PUTVAL #{@instance_name}/#{@plugin_name}-#{instance_name}/metrics_#{type}-#{name} #{@time}:#{output}"
+        end
+
+        def meter(region, name, value)
+            keys = ['mean', 'm1', 'm5', 'm15']
+            output = ""
+            keys.each do |field|
+                output << "%.6f"%value[field] + ":"
+            end
+            output << value["count"].to_s
+
+            putval("meter", region, name, output)
+        end
+
+        def timer(region, name, value)
+            keys = ['min', 'max', 'mean', 'std_dev', 'median', 'p75', 'p95', 'p98', 'p99', 'p999']
+            output = ""
+            keys.each do |field|
+                output << "%.6f"%value[field] + ":"
+            end
+            output.chop!
+            putval("timer", region, name, output)
+        end
+
+        def counter(region, name, value)
+            putval("counter", region, name, value['count'])
+        end
+
+        def gauge(region, name, value)
+            putval("gauge", region, name, value['value'])
+        end
+
+        def fields
+            fields = @metrics.keys
+            fields.delete('jvm')
+            fields
+        end
+
+    end
+end
+
+
+opts = OptionParser.new
+opts.banner = "Usage: metrics-stats [options]"
+
+opts.separator ""
+opts.separator "Specific options:"
+
+opts.on("-p PORT", "--port=PORT", "Port of metrics server", "Default: 8081"){|str| options[:port] = str.to_i}
+opts.on("-H HOSTNAME", "--hostname=HOSTNAME", "Host of metrics server", "Default: localhost"){|str| options[:hostname] = str}
+opts.on("-i INSTANCE", "--instance=INSTANCE", "Instance id"){|str| options[:instance] = str}
+opts.on("-w WAITTIME", "--wait=WAITTIME", "Time to wait between samples", "Default: 10"){|str| options[:wait_time] = str.to_i}
+opts.on("-t TIMEOUT", "--timeout=TIMEOUT", "Time to wait for connection open", "Default: 10"){|str| options[:timeout] = str.to_i}
+opts.on("-s", "--single", "Run in single-shot mode"){|s| options[:single] = s}
+
+opts.separator ""
+opts.separator "Common options:"
+
+opts.on_tail("-h", "--help", "Shows this message") {
+    exit
+}
+
+begin
+    opts.parse(ARGV)
+    if ARGV.length == 0
+        exit
+    end
+
+    #Check for required args
+    raise "Instance id is required" unless options[:instance]
+
+rescue SystemExit
+    puts opts
+    exit
+rescue Exception => e
+    puts "Error: #{e}"
+    puts opts
+    exit
+end
+
+# Main
+begin
+    # Sync stdout so that it will flush to collectd properly.
+    $stdout.sync = true
+
+
+    # Collection loop
+    m = Collectd::Metrics.new(options[:hostname], options[:port], options[:timeout])
+    m.plugin_name = PLUGIN_NAME
+    m.instance_name = options[:instance]
+
+    while true do
+        start_run = Time.now.to_i
+        next_run = start_run + options[:wait_time]
+
+        # collectd data and print the values
+
+        if m.reload(start_run)
+            # JVM Metrics
+            puts "PUTVAL #{options[:instance]}/#{PLUGIN_NAME}-jvm/jvm_threads-threads #{start_run}:#{m.jvm['thread_count']}:#{m.jvm['daemon_thread_count']}"
+            puts "PUTVAL #{options[:instance]}/#{PLUGIN_NAME}-jvm/jvm_memory-memory #{start_run}:#{m.memory}"
+            puts "PUTVAL #{options[:instance]}/#{PLUGIN_NAME}-jvm/jvm_fd-fd_usage #{start_run}:#{m.fd_usage}"
+
+            m.fields.each do |f|
+                region = m.metrics[f]
+                region.keys.each do |metric|
+                    case region[metric]['type']
+                    when "meter"
+                        puts m.meter(f, metric, region[metric])
+                    when "counter"
+                        puts m.counter(f, metric, region[metric])
+                    when "timer"
+                        puts m.timer(f, "#{metric}_d", region[metric]['duration'])
+                        puts m.meter(f, "#{metric}_r", region[metric]['rate'])
+                    end
+                end
+            end
+
+        end
+
+        if options[:single]
+            break
+        end
+
+        # sleep to make the interval
+        while((time_left = (next_run - Time.now.to_i)) > 0) do
+            sleep(time_left)
+        end
+    end
+end
