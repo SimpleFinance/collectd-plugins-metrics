@@ -1,18 +1,38 @@
-VERSION=0.1.0
-NAME=collectd-plugin-metrics
+NAME=collectd-plugins-metrics
+VERSION=0.1.3
+URL=https://github.banksimple.com/BankSimple/$(NAME)
+DESCRIPTION="Collectd plugin for metrics"
+MAINTAINER=packages@banksimple.com
+ARCH=all
+PACKAGE_NAME=$(NAME)
+PACKAGE_VERSION=$(VERSION)
 
-PREFIX=/usr
-PLUGIN_DIR=${PREFIX}/lib/collectd/plugins
+PREFIX=installroot/usr/lib/collectd/plugins
+SOURCES=metrics-stats
 
-install: metrics-stats
-	install -d ${DEST_DIR}${PLUGIN_DIR}
-	install metrics-stats ${DEST_DIR}${PLUGIN_DIR}
+.PHONY: default
+default: package
+
+
+test:
+	./metrics-stats -f samples/metrics1.json
+
+sources:
+	echo "Installing from current dir"
+
+install: sources
+	install -d $(PREFIX)
+	install $(SOURCES) $(PREFIX)
+
+package: install
+	/opt/fpm/bin/fpm -s dir -t deb  -n $(PACKAGE_NAME)  -v $(PACKAGE_VERSION) \
+                --url $(URL) --arch $(ARCH) --description $(DESCRIPTION) \
+                -m $(MAINTAINER) \
+		-p $(PACKAGE_NAME)-$(PACKAGE_VERSION)_$(ARCH).deb -C installroot .
+
+
+distclean: clean
+	@rm -f *.deb
 
 clean:
-	@rm ${NAME}-${VERSION}.tar.gz
-
-
-dist:
-	@echo "creating archive ${NAME}-${VERSION}.tar.gz..."
-	git archive --format=tar --prefix="${NAME}-${VERSION}/" HEAD | gzip > "${NAME}-${VERSION}.tar.gz"
-
+	@rm -rf $(NAME)-$(VERSION) $(NAME)-$(VERSION).tar.gz installroot

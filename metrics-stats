@@ -27,17 +27,16 @@ PLUGIN_NAME = 'metrics'
 
 module Collectd
     class Metrics
-        attr_accessor :metrics
         attr_accessor :plugin_name
-        attr_accessor :instance_name
+        attr_accessor :foo
 
         def initialize(hostname, port, timeout)
+            @hostname = hostname
             @uri = URI.parse("http://#{hostname}:#{port}/metrics")
             @timeout = timeout
-            reload
         end
 
-        def reload(time=Time.now.to_i)
+        def from_socket(time)
             response = nil
             begin
                 conn = Net::HTTP.new(@uri.host, @uri.port)
@@ -59,13 +58,46 @@ module Collectd
 
             case response
             when Net::HTTPSuccess then
+                @start_time=time
                 @metrics = JSON.parse(response.body)
-                @time = time
             else
                 #puts response.error!
                 @metrics = nil
             end
             @metrics
+        end
+
+        def from_file(file, time)
+            puts "File : #{file}"
+            f = File.new file
+            @metrics = JSON.parse(f.read)
+            @start_time = time
+
+            @metrics
+        end
+
+        def parse
+            # JVM Metrics
+            puts "PUTVAL #{@hostname}/#{@plugin_name}-jvm/jvm_threads-threads #{@start_time}:#{jvm['thread_count']}:#{jvm['daemon_thread_count']}"
+            puts "PUTVAL #{@hostname}/#{@plugin_name}-jvm/jvm_memory-memory #{@start_time}:#{memory}"
+            puts "PUTVAL #{@hostname}/#{@plugin_name}-jvm/jvm_fd-fd_usage #{@start_time}:#{fd_usage}"
+
+            fields.each do |f|
+                region = @metrics[f]
+                region.keys.each do |metric|
+                    case region[metric]['type']
+                    when "meter"
+                        puts meter(f, metric, region[metric])
+                    when "counter"
+                        puts counter(f, metric, region[metric])
+                    when "gauge"
+                        puts gauge(f, metric, region[metric])
+                    when "timer"
+                        puts timer(f, "#{metric}_d", region[metric]['duration'])
+                        puts meter(f, "#{metric}_r", region[metric]['rate'])
+                    end
+                end
+            end
         end
 
         def jvm
@@ -83,7 +115,8 @@ module Collectd
 
         def putval(type, region, name, output)
             instance_name = region.split('.')[-1]
-            "PUTVAL #{@instance_name}/#{@plugin_name}-#{instance_name}/metrics_#{type}-#{name} #{@time}:#{output}"
+            instance_name = region
+            "PUTVAL #{@hostname}/#{@plugin_name}-#{instance_name}/metrics_#{type}-#{name} #{@start_time}:#{output}"
         end
 
         def meter(region, name, value)
@@ -133,10 +166,17 @@ opts.separator "Specific options:"
 
 opts.on("-p PORT", "--port=PORT", "Port of metrics server", "Default: 8081"){|str| options[:port] = str.to_i}
 opts.on("-H HOSTNAME", "--hostname=HOSTNAME", "Host of metrics server", "Default: localhost"){|str| options[:hostname] = str}
-opts.on("-i INSTANCE", "--instance=INSTANCE", "Instance id"){|str| options[:instance] = str}
 opts.on("-w WAITTIME", "--wait=WAITTIME", "Time to wait between samples", "Default: 10"){|str| options[:wait_time] = str.to_i}
 opts.on("-t TIMEOUT", "--timeout=TIMEOUT", "Time to wait for connection open", "Default: 10"){|str| options[:timeout] = str.to_i}
-opts.on("-s", "--single", "Run in single-shot mode"){|s| options[:single] = s}
+opts.on("--service=SERVICE", "Name of servive we're monitoring"){|str| options[:service] = str}
+opts.on("--single", "Run in single-shot mode"){|s| options[:single] = s}
+
+
+opts.separator ""
+opts.separator "Debugging options"
+opts.on("-fFILE", "--file=FILE", "Read sample data from a CSV file"){ |str|
+    options[:file] = str
+}
 
 opts.separator ""
 opts.separator "Common options:"
@@ -151,19 +191,18 @@ begin
         exit
     end
 
-    #Check for required args
-    raise "Instance id is required" unless options[:instance]
-
+    if options[:file]
+        options[:single] = true
+    end
 rescue SystemExit
-    puts opts
+    $stderr.puts opts
     exit
 rescue Exception => e
-    puts "Error: #{e}"
-    puts opts
+    $stderr.puts "Error: #{e}"
+    $stderr.puts opts
     exit
 end
 
-# Main
 begin
     # Sync stdout so that it will flush to collectd properly.
     $stdout.sync = true
@@ -171,8 +210,11 @@ begin
 
     # Collection loop
     m = Collectd::Metrics.new(options[:hostname], options[:port], options[:timeout])
-    m.plugin_name = PLUGIN_NAME
-    m.instance_name = options[:instance]
+    if options[:service]
+        m.plugin_name = "#{PLUGIN_NAME}_#{options[:service]}"
+    else
+        m.plugin_name = PLUGIN_NAME
+    end
 
     while true do
         start_run = Time.now.to_i
@@ -180,28 +222,12 @@ begin
 
         # collectd data and print the values
 
-        if m.reload(start_run)
-            # JVM Metrics
-            puts "PUTVAL #{options[:instance]}/#{PLUGIN_NAME}-jvm/jvm_threads-threads #{start_run}:#{m.jvm['thread_count']}:#{m.jvm['daemon_thread_count']}"
-            puts "PUTVAL #{options[:instance]}/#{PLUGIN_NAME}-jvm/jvm_memory-memory #{start_run}:#{m.memory}"
-            puts "PUTVAL #{options[:instance]}/#{PLUGIN_NAME}-jvm/jvm_fd-fd_usage #{start_run}:#{m.fd_usage}"
-
-            m.fields.each do |f|
-                region = m.metrics[f]
-                region.keys.each do |metric|
-                    case region[metric]['type']
-                    when "meter"
-                        puts m.meter(f, metric, region[metric])
-                    when "counter"
-                        puts m.counter(f, metric, region[metric])
-                    when "timer"
-                        puts m.timer(f, "#{metric}_d", region[metric]['duration'])
-                        puts m.meter(f, "#{metric}_r", region[metric]['rate'])
-                    end
-                end
-            end
-
+        if options[:file]
+            m.from_file(options[:file], start_run)
+        else
+            m.from_uri(start_run)
         end
+        m.parse
 
         if options[:single]
             break
