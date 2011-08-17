@@ -36,7 +36,7 @@ module Collectd
             @timeout = timeout
         end
 
-        def from_socket(time)
+        def from_uri(time)
             response = nil
             begin
                 conn = Net::HTTP.new(@uri.host, @uri.port)

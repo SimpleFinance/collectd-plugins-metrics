@@ -1,5 +1,5 @@
 NAME=collectd-plugins-metrics
-VERSION=0.1.3
+VERSION=0.2
 URL=https://github.banksimple.com/BankSimple/$(NAME)
 DESCRIPTION="Collectd plugin for metrics"
 MAINTAINER=packages@banksimple.com
