@@ -35,4 +35,4 @@ distclean: clean
 	@rm -f *.deb
 
 clean:
-	@rm -rf $(NAME)-$(VERSION) $(NAME)-$(VERSION).tar.gz installroot
+	@rm -rf installroot
