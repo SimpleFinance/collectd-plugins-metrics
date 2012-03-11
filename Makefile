@@ -1,8 +1,8 @@
 NAME=collectd-plugins-metrics
 VERSION=0.2.0
-URL=https://github.banksimple.com/BankSimple/$(NAME)
+URL=https://github.com/SimpleFinance/$(NAME)
 DESCRIPTION="Collectd plugin for metrics"
-MAINTAINER=packages@banksimple.com
+MAINTAINER=package@simple.com
 ARCH=all
 PACKAGE_NAME=$(NAME)
 PACKAGE_VERSION=$(VERSION)
